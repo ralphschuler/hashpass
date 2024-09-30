@@ -9,12 +9,23 @@ import fireAndForget from './fire-and-forget';
 import hashpass from './worker-client';
 import { Button } from './button';
 
+// Import or define the SmartCardWrapper class
+// Assuming it's defined in the same project. If it's in a separate file, adjust the import accordingly.
+import {SmartCardWrapper} from './smartcard-wrapper'; // Adjust the path as necessary
+
 const debounceMilliseconds = 200;
 const copyToClipboardSuccessIndicatorMilliseconds = 1000;
 
 const useStyles = createUseStyles({
   domain: {
     color: '#666666',
+  },
+  smartCardButton: {
+    marginLeft: '8px', // Adjust styling as needed
+  },
+  errorMessage: {
+    color: 'red',
+    marginTop: '8px',
   },
 });
 
@@ -39,8 +50,22 @@ const UserInterface = ({
   const [copyToClipboardTimeoutId, setCopyToClipboardTimeoutId] =
     useState<ReturnType<typeof setTimeout> | null>(null);
   const [pendingFillInPassword, setPendingFillInPassword] = useState(false);
+  const [smartCardError, setSmartCardError] = useState<string | null>(null);
+  const [isSmartCardLoading, setIsSmartCardLoading] = useState(false);
+
   const domainRef = useRef<HTMLInputElement>(null);
   const universalPasswordRef = useRef<HTMLInputElement>(null);
+
+  // Instantiate SmartCardWrapper
+  const smartCardWrapperRef = useRef<SmartCardWrapper | null>(null);
+  useEffect(() => {
+    try {
+      smartCardWrapperRef.current = new SmartCardWrapper();
+    } catch (error) {
+      console.warn("SmartCardWrapper initialization failed:", error);
+      // Optionally, you can set a state to disable smart card functionality
+    }
+  }, []);
 
   // eslint-disable-next-line react-hooks/exhaustive-deps -- We need to debounce this function.
   const updateGeneratedPassword = useCallback(
@@ -51,11 +76,18 @@ const UserInterface = ({
       );
       fireAndForget(
         (async (): Promise<void> => {
-          setGeneratedPassword(await hashpass(newDomain, newUniversalPassword));
-          setUpdatesInProgress(
-            // eslint-disable-next-line @typescript-eslint/no-magic-numbers -- Decrement = -1.
-            (previousTasksInProgress) => previousTasksInProgress - 1,
-          );
+          try {
+            const hashed = await hashpass(newDomain, newUniversalPassword);
+            setGeneratedPassword(hashed);
+          } catch (error) {
+            console.error("Error hashing password:", error);
+            // Optionally, handle the error (e.g., show a message to the user)
+          } finally {
+            setUpdatesInProgress(
+              // eslint-disable-next-line @typescript-eslint/no-magic-numbers -- Decrement = -1.
+              (previousTasksInProgress) => previousTasksInProgress - 1,
+            );
+          }
         })(),
       );
     }, debounceMilliseconds),
@@ -126,39 +158,96 @@ const UserInterface = ({
     [updateGeneratedPassword],
   );
 
-  // eslint-disable-next-line @typescript-eslint/no-magic-numbers -- No tasks in progress?
-  if (updatesInProgress === 0) {
-    if (pendingCopyToClipboard) {
-      setPendingCopyToClipboard(false);
+  // Handler for using the smart card to retrieve the password
+  const onUseSmartCard = useCallback(async (): Promise<void> => {
+    if (!smartCardWrapperRef.current) {
+      setSmartCardError("Smart card functionality is not available.");
+      return;
+    }
 
-      fireAndForget(
-        (async (): Promise<void> => {
-          await navigator.clipboard.writeText(generatedPassword);
+    setIsSmartCardLoading(true);
+    setSmartCardError(null);
 
-          setCopyToClipboardTimeoutId((oldTimeoutId) => {
-            if (oldTimeoutId !== null) {
-              clearTimeout(oldTimeoutId);
+    try {
+      const secretKey = await smartCardWrapperRef.current.getSecretKey();
+      setUniversalPassword(secretKey);
+      // Optionally, you can also show a success message or perform additional actions
+    } catch (error) {
+      console.error("Error retrieving secret key from smart card:", error);
+      setSmartCardError(
+        (error as Error).message || "Failed to retrieve secret key from smart card."
+      );
+    } finally {
+      setIsSmartCardLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const domainElement = domainRef.current;
+    const universalPasswordElement = universalPasswordRef.current;
+
+    if (domainElement && initialDomain !== null && domain === null) {
+      setDomain(initialDomain);
+
+      if (document.activeElement === document.body) {
+        if (initialDomain === '') {
+          domainElement.focus();
+        } else if (universalPasswordElement) {
+          universalPasswordElement.focus();
+        }
+      }
+    }
+  }, [domain, initialDomain]);
+
+  useEffect(() => {
+    updateGeneratedPassword(domain ?? '', universalPassword);
+  }, [updateGeneratedPassword, domain, universalPassword]);
+
+  // Handle side effects when updates are not in progress
+  useEffect(() => {
+    if (updatesInProgress === 0) {
+      if (pendingCopyToClipboard) {
+        setPendingCopyToClipboard(false);
+
+        fireAndForget(
+          (async (): Promise<void> => {
+            try {
+              await navigator.clipboard.writeText(generatedPassword);
+
+              setCopyToClipboardTimeoutId((oldTimeoutId) => {
+                if (oldTimeoutId !== null) {
+                  clearTimeout(oldTimeoutId);
+                }
+
+                return setTimeout(() => {
+                  setCopyToClipboardTimeoutId(null);
+                }, copyToClipboardSuccessIndicatorMilliseconds);
+              });
+            } catch (error) {
+              console.error("Failed to copy to clipboard:", error);
+              // Optionally, set an error state to inform the user
             }
+          })(),
+        );
+      }
 
-            return setTimeout(() => {
-              setCopyToClipboardTimeoutId(null);
-            }, copyToClipboardSuccessIndicatorMilliseconds);
-          });
-        })(),
-      );
+      if (pendingFillInPassword) {
+        setPendingFillInPassword(false);
+
+        fireAndForget(
+          (async (): Promise<void> => {
+            try {
+              await fillInPassword(generatedPassword);
+              window.close();
+            } catch (error) {
+              console.error("Failed to fill in password:", error);
+              // Optionally, set an error state to inform the user
+            }
+          })(),
+        );
+      }
     }
-
-    if (pendingFillInPassword) {
-      setPendingFillInPassword(false);
-
-      fireAndForget(
-        (async (): Promise<void> => {
-          await fillInPassword(generatedPassword);
-          window.close();
-        })(),
-      );
-    }
-  }
+  }, [updatesInProgress, pendingCopyToClipboard, pendingFillInPassword, generatedPassword]);
 
   return (
     <form onSubmit={onFormSubmit}>
@@ -185,32 +274,49 @@ const UserInterface = ({
         updating={false}
         value={domain ?? ''}
       />
-      <Input
-        buttons={[
-          <Button
-            buttonType={{
-              type: 'normal',
-              onClick: onToggleUniversalPasswordHidden,
-            }}
-            description={
-              isUniversalPasswordHidden
-                ? 'Show the password.'
-                : 'Hide the password.'
-            }
-            imageName={isUniversalPasswordHidden ? 'eye-off' : 'eye'}
-            key="eye"
-          />,
-        ]}
-        disabled={false}
-        hideValue={isUniversalPasswordHidden}
-        label="Universal password"
-        monospace
-        onChange={setUniversalPassword}
-        placeholder=""
-        ref={universalPasswordRef}
-        updating={false}
-        value={universalPassword}
-      />
+      <div style={{ display: 'flex', alignItems: 'center' }}>
+        <Input
+          buttons={[
+            <Button
+              buttonType={{
+                type: 'normal',
+                onClick: onToggleUniversalPasswordHidden,
+              }}
+              description={
+                isUniversalPasswordHidden
+                  ? 'Show the password.'
+                  : 'Hide the password.'
+              }
+              imageName={isUniversalPasswordHidden ? 'eye-off' : 'eye'}
+              key="eye"
+            />,
+            <Button
+              buttonType={{
+                type: 'normal',
+                onClick: onUseSmartCard,
+              }}
+              description="Use Smart Card to retrieve password."
+              imageName="smart-card" // Ensure you have an appropriate icon
+              key="smart-card"
+              disabled={isSmartCardLoading || !('smartCard' in navigator)}
+              className={classes.smartCardButton}
+            />,
+          ]}
+          disabled={false}
+          hideValue={isUniversalPasswordHidden}
+          label="Universal password"
+          monospace
+          onChange={setUniversalPassword}
+          placeholder=""
+          ref={universalPasswordRef}
+          updating={false}
+          value={universalPassword}
+        />
+        {isSmartCardLoading && <span>Loading...</span>}
+      </div>
+      {smartCardError && (
+        <div className={classes.errorMessage}>{smartCardError}</div>
+      )}
       <Input
         buttons={[
           ...(isPasswordFieldActive
@@ -250,7 +356,7 @@ const UserInterface = ({
             key="eye"
           />,
         ]}
-        disabled
+        disabled={updatesInProgress > 0}
         hideValue={isGeneratedPasswordHidden}
         label={
           (domain ?? '').trim() === '' ? (
