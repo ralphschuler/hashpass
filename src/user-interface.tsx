@@ -1,17 +1,20 @@
-import * as React from 'react';
+// UserInterface.tsx
+import React, { useEffect, useCallback, useRef, useState } from 'react';
 import debounce from 'debounce';
 import { createUseStyles } from 'react-jss';
-import { useEffect, useCallback, useRef, useState } from 'react';
 
-import Input from './input';
 import fillInPassword from './fill-in-password';
 import fireAndForget from './fire-and-forget';
 import hashpass from './worker-client';
 import { Button } from './button';
 
-// Import or define the SmartCardWrapper class
-// Assuming it's defined in the same project. If it's in a separate file, adjust the import accordingly.
-import {SmartCardWrapper} from './smartcard-wrapper'; // Adjust the path as necessary
+import DomainInput from './domain-input';
+import UniversalPasswordInput from './universal-password-input';
+import GeneratedPasswordInput from './generated-password-input';
+import PinModal from './pin-modal';
+
+// Import the functional smart card module
+import { getSecretKey } from './smartcard'; // Adjust the path as necessary
 
 const debounceMilliseconds = 200;
 const copyToClipboardSuccessIndicatorMilliseconds = 1000;
@@ -20,22 +23,21 @@ const useStyles = createUseStyles({
   domain: {
     color: '#666666',
   },
-  smartCardButton: {
-    marginLeft: '8px', // Adjust styling as needed
-  },
   errorMessage: {
     color: 'red',
     marginTop: '8px',
   },
 });
 
-const UserInterface = ({
+interface UserInterfaceProps {
+  initialDomain: string | null;
+  isPasswordFieldActive: boolean;
+}
+
+const UserInterface: React.FC<UserInterfaceProps> = ({
   initialDomain,
   isPasswordFieldActive,
-}: {
-  readonly initialDomain: string | null;
-  readonly isPasswordFieldActive: boolean;
-}): React.ReactElement => {
+}) => {
   const classes = useStyles();
   const [domain, setDomain] = useState<string | null>(initialDomain);
   const [universalPassword, setUniversalPassword] = useState('');
@@ -44,7 +46,6 @@ const UserInterface = ({
   const [generatedPassword, setGeneratedPassword] = useState('');
   const [isGeneratedPasswordHidden, setIsGeneratedPasswordHidden] =
     useState(true);
-  // eslint-disable-next-line @typescript-eslint/no-magic-numbers -- Start with 0 tasks in progress.
   const [updatesInProgress, setUpdatesInProgress] = useState(0);
   const [pendingCopyToClipboard, setPendingCopyToClipboard] = useState(false);
   const [copyToClipboardTimeoutId, setCopyToClipboardTimeoutId] =
@@ -52,41 +53,28 @@ const UserInterface = ({
   const [pendingFillInPassword, setPendingFillInPassword] = useState(false);
   const [smartCardError, setSmartCardError] = useState<string | null>(null);
   const [isSmartCardLoading, setIsSmartCardLoading] = useState(false);
+  const [isPinModalOpen, setIsPinModalOpen] = useState(false);
 
   const domainRef = useRef<HTMLInputElement>(null);
   const universalPasswordRef = useRef<HTMLInputElement>(null);
 
-  // Instantiate SmartCardWrapper
-  const smartCardWrapperRef = useRef<SmartCardWrapper | null>(null);
-  useEffect(() => {
-    try {
-      smartCardWrapperRef.current = new SmartCardWrapper();
-    } catch (error) {
-      console.warn("SmartCardWrapper initialization failed:", error);
-      // Optionally, you can set a state to disable smart card functionality
-    }
-  }, []);
+  // State to manage copy success indicator
+  const [copySuccess, setCopySuccess] = useState(false);
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- We need to debounce this function.
+  // Debounced function to update the generated password
   const updateGeneratedPassword = useCallback(
     debounce((newDomain: string, newUniversalPassword: string) => {
-      setUpdatesInProgress(
-        // eslint-disable-next-line @typescript-eslint/no-magic-numbers -- Increment = +1.
-        (previousTasksInProgress) => previousTasksInProgress + 1,
-      );
+      setUpdatesInProgress((prev) => prev + 1);
       fireAndForget(
         (async (): Promise<void> => {
           try {
             const hashed = await hashpass(newDomain, newUniversalPassword);
             setGeneratedPassword(hashed);
           } catch (error) {
-            console.error("Error hashing password:", error);
+            console.error('Error hashing password:', error);
             // Optionally, handle the error (e.g., show a message to the user)
           } finally {
-            setUpdatesInProgress(
-              // eslint-disable-next-line @typescript-eslint/no-magic-numbers -- Decrement = -1.
-              (previousTasksInProgress) => previousTasksInProgress - 1,
-            );
+            setUpdatesInProgress((prev) => prev - 1);
           }
         })(),
       );
@@ -94,11 +82,11 @@ const UserInterface = ({
     [],
   );
 
+  // Effect to set initial domain and focus
   useEffect(() => {
     const domainElement = domainRef.current;
     const universalPasswordElement = universalPasswordRef.current;
 
-    // Set the domain and focus the appropriate input if necessary.
     if (initialDomain !== null && domain === null) {
       setDomain(initialDomain);
 
@@ -114,10 +102,12 @@ const UserInterface = ({
     }
   }, [domain, initialDomain]);
 
+  // Effect to update generated password when domain or universalPassword changes
   useEffect(() => {
     updateGeneratedPassword(domain ?? '', universalPassword);
   }, [updateGeneratedPassword, domain, universalPassword]);
 
+  // Handler to reset domain
   const onResetDomain = useCallback((): void => {
     setDomain(initialDomain ?? '');
 
@@ -128,25 +118,29 @@ const UserInterface = ({
     }
   }, [initialDomain]);
 
+  // Handler to toggle universal password visibility
   const onToggleUniversalPasswordHidden = useCallback((): void => {
-    setIsUniversalPasswordHidden(!isUniversalPasswordHidden);
+    setIsUniversalPasswordHidden((prev) => !prev);
 
     const universalPasswordElement = universalPasswordRef.current;
 
     if (universalPasswordElement !== null) {
       universalPasswordElement.focus();
     }
-  }, [isUniversalPasswordHidden]);
+  }, []);
 
+  // Handler to copy generated password to clipboard
   const onCopyGeneratedPasswordToClipboard = useCallback((): void => {
     updateGeneratedPassword.flush();
     setPendingCopyToClipboard(true);
   }, [updateGeneratedPassword]);
 
+  // Handler to toggle generated password visibility
   const onToggleGeneratedPasswordHidden = useCallback((): void => {
-    setIsGeneratedPasswordHidden(!isGeneratedPasswordHidden);
-  }, [isGeneratedPasswordHidden]);
+    setIsGeneratedPasswordHidden((prev) => !prev);
+  }, []);
 
+  // Handler for form submission
   const onFormSubmit = useCallback(
     (event: React.FormEvent): void => {
       event.preventDefault();
@@ -158,52 +152,48 @@ const UserInterface = ({
     [updateGeneratedPassword],
   );
 
-  // Handler for using the smart card to retrieve the password
-  const onUseSmartCard = useCallback(async (): Promise<void> => {
-    if (!smartCardWrapperRef.current) {
-      setSmartCardError("Smart card functionality is not available.");
-      return;
-    }
-
-    setIsSmartCardLoading(true);
-    setSmartCardError(null);
-
-    try {
-      const secretKey = await smartCardWrapperRef.current.getSecretKey();
-      setUniversalPassword(secretKey);
-      // Optionally, you can also show a success message or perform additional actions
-    } catch (error) {
-      console.error("Error retrieving secret key from smart card:", error);
-      setSmartCardError(
-        (error as Error).message || "Failed to retrieve secret key from smart card."
-      );
-    } finally {
-      setIsSmartCardLoading(false);
-    }
+  // Handler to open the PIN modal
+  const openPinModal = useCallback(() => {
+    setIsPinModalOpen(true);
   }, []);
 
-  useEffect(() => {
-    const domainElement = domainRef.current;
-    const universalPasswordElement = universalPasswordRef.current;
+  // Handler to close the PIN modal
+  const closePinModal = useCallback(() => {
+    setIsPinModalOpen(false);
+  }, []);
 
-    if (domainElement && initialDomain !== null && domain === null) {
-      setDomain(initialDomain);
+  // Handler when PIN is submitted from the modal
+  const handlePinSubmit = useCallback(
+    async (pin: string): Promise<void> => {
+      closePinModal();
 
-      if (document.activeElement === document.body) {
-        if (initialDomain === '') {
-          domainElement.focus();
-        } else if (universalPasswordElement) {
-          universalPasswordElement.focus();
-        }
+      // Check if the Smart Card API is available
+      if (!('smartCard' in navigator)) {
+        setSmartCardError('Smart Card API is not supported in this browser.');
+        return;
       }
-    }
-  }, [domain, initialDomain]);
 
-  useEffect(() => {
-    updateGeneratedPassword(domain ?? '', universalPassword);
-  }, [updateGeneratedPassword, domain, universalPassword]);
+      setIsSmartCardLoading(true);
+      setSmartCardError(null);
 
-  // Handle side effects when updates are not in progress
+      try {
+        // Retrieve the secret key using the functional module
+        const secretKey = await getSecretKey(pin);
+        setUniversalPassword(secretKey);
+        // Optionally, you can also show a success message or perform additional actions
+      } catch (error) {
+        console.error('Error retrieving secret key from smart card:', error);
+        setSmartCardError(
+          (error as Error).message || 'Failed to retrieve secret key from smart card.',
+        );
+      } finally {
+        setIsSmartCardLoading(false);
+      }
+    },
+    [closePinModal],
+  );
+
+  // Effect to handle pending copy to clipboard and fill in password actions
   useEffect(() => {
     if (updatesInProgress === 0) {
       if (pendingCopyToClipboard) {
@@ -213,6 +203,7 @@ const UserInterface = ({
           (async (): Promise<void> => {
             try {
               await navigator.clipboard.writeText(generatedPassword);
+              setCopySuccess(true);
 
               setCopyToClipboardTimeoutId((oldTimeoutId) => {
                 if (oldTimeoutId !== null) {
@@ -220,11 +211,12 @@ const UserInterface = ({
                 }
 
                 return setTimeout(() => {
+                  setCopySuccess(false);
                   setCopyToClipboardTimeoutId(null);
                 }, copyToClipboardSuccessIndicatorMilliseconds);
               });
             } catch (error) {
-              console.error("Failed to copy to clipboard:", error);
+              console.error('Failed to copy to clipboard:', error);
               // Optionally, set an error state to inform the user
             }
           })(),
@@ -240,141 +232,62 @@ const UserInterface = ({
               await fillInPassword(generatedPassword);
               window.close();
             } catch (error) {
-              console.error("Failed to fill in password:", error);
+              console.error('Failed to fill in password:', error);
               // Optionally, set an error state to inform the user
             }
           })(),
         );
       }
     }
-  }, [updatesInProgress, pendingCopyToClipboard, pendingFillInPassword, generatedPassword]);
+  }, [
+    updatesInProgress,
+    pendingCopyToClipboard,
+    pendingFillInPassword,
+    generatedPassword,
+  ]);
 
   return (
-    <form onSubmit={onFormSubmit}>
-      <Input
-        buttons={
-          initialDomain === null || domain === initialDomain
-            ? []
-            : [
-                <Button
-                  buttonType={{ type: 'normal', onClick: onResetDomain }}
-                  description="Reset the domain."
-                  imageName="refresh"
-                  key="refresh"
-                />,
-              ]
-        }
-        disabled={false}
-        hideValue={false}
-        label="Domain"
-        monospace={false}
-        onChange={setDomain}
-        placeholder="example.com"
-        ref={domainRef}
-        updating={false}
-        value={domain ?? ''}
-      />
-      <div style={{ display: 'flex', alignItems: 'center' }}>
-        <Input
-          buttons={[
-            <Button
-              buttonType={{
-                type: 'normal',
-                onClick: onToggleUniversalPasswordHidden,
-              }}
-              description={
-                isUniversalPasswordHidden
-                  ? 'Show the password.'
-                  : 'Hide the password.'
-              }
-              imageName={isUniversalPasswordHidden ? 'eye-off' : 'eye'}
-              key="eye"
-            />,
-            <Button
-              buttonType={{
-                type: 'normal',
-                onClick: onUseSmartCard,
-              }}
-              description="Use Smart Card to retrieve password."
-              imageName="smart-card" // Ensure you have an appropriate icon
-              key="smart-card"
-              disabled={isSmartCardLoading || !('smartCard' in navigator)}
-              className={classes.smartCardButton}
-            />,
-          ]}
-          disabled={false}
-          hideValue={isUniversalPasswordHidden}
-          label="Universal password"
-          monospace
-          onChange={setUniversalPassword}
-          placeholder=""
-          ref={universalPasswordRef}
-          updating={false}
-          value={universalPassword}
+    <>
+      <form onSubmit={onFormSubmit}>
+        <DomainInput
+          domain={domain}
+          initialDomain={initialDomain}
+          onChange={setDomain}
+          onReset={onResetDomain}
+          refProp={domainRef}
         />
-        {isSmartCardLoading && <span>Loading...</span>}
-      </div>
-      {smartCardError && (
-        <div className={classes.errorMessage}>{smartCardError}</div>
-      )}
-      <Input
-        buttons={[
-          ...(isPasswordFieldActive
-            ? [
-                <Button
-                  buttonType={{ type: 'submit' }}
-                  description="Fill in the password field and close Hashpass."
-                  imageName="log-in"
-                  key="log-in"
-                />,
-              ]
-            : []),
-          <Button
-            buttonType={
-              copyToClipboardTimeoutId
-                ? { type: 'noninteractive' }
-                : {
-                    type: 'normal',
-                    onClick: onCopyGeneratedPasswordToClipboard,
-                  }
-            }
-            description="Copy the password to the clipboard."
-            imageName={copyToClipboardTimeoutId ? 'check' : 'clipboard-copy'}
-            key="clipboard-copy"
-          />,
-          <Button
-            buttonType={{
-              type: 'normal',
-              onClick: onToggleGeneratedPasswordHidden,
-            }}
-            description={
-              isGeneratedPasswordHidden
-                ? 'Show the password.'
-                : 'Hide the password.'
-            }
-            imageName={isGeneratedPasswordHidden ? 'eye-off' : 'eye'}
-            key="eye"
-          />,
-        ]}
-        disabled={updatesInProgress > 0}
-        hideValue={isGeneratedPasswordHidden}
-        label={
-          (domain ?? '').trim() === '' ? (
-            'Password for this domain'
-          ) : (
-            <span>
-              Password for <span className={classes.domain}>{domain}</span>
-            </span>
-          )
-        }
-        monospace
-        onChange={null}
-        placeholder=""
-        // eslint-disable-next-line @typescript-eslint/no-magic-numbers -- Any tasks in progress?
-        updating={updatesInProgress !== 0}
-        value={generatedPassword}
+
+        <UniversalPasswordInput
+          universalPassword={universalPassword}
+          isHidden={isUniversalPasswordHidden}
+          onChange={setUniversalPassword}
+          onToggleVisibility={onToggleUniversalPasswordHidden}
+          onUseSmartCard={openPinModal}
+          isSmartCardLoading={isSmartCardLoading}
+          isSmartCardAvailable={'smartCard' in navigator}
+          errorMessage={smartCardError}
+          refProp={universalPasswordRef}
+        />
+
+        <GeneratedPasswordInput
+          generatedPassword={generatedPassword}
+          isHidden={isGeneratedPasswordHidden}
+          onCopy={onCopyGeneratedPasswordToClipboard}
+          onToggleVisibility={onToggleGeneratedPasswordHidden}
+          copySuccess={copySuccess}
+          domain={domain}
+          isPasswordFieldActive={isPasswordFieldActive}
+          onSubmit={onFormSubmit}
+          isUpdating={updatesInProgress !== 0}
+        />
+      </form>
+
+      <PinModal
+        isOpen={isPinModalOpen}
+        onClose={closePinModal}
+        onSubmit={handlePinSubmit}
       />
-    </form>
+    </>
   );
 };
 
