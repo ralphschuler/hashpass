@@ -63,3 +63,4 @@ Hashpass is also available on the web at
 [stepchowfun.github.io/hashpass](https://stepchowfun.github.io/hashpass/),
 although the Chrome extension is generally more ergonomic to use since it can
 interact with the page you're logging into.
+
